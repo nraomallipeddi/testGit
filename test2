@@ -1,0 +1,128 @@
+ Log.info("Starting Parquet File Merge Driver...")
+
+    val paramMap = ArgumentsParser.getParams(args)
+    paramMap.foreach(x => Log.info(x._1 + " = " + x._2))
+
+    case class MissingParameterException(s: String) extends RuntimeException(s)
+
+    val appName = paramMap.getOrElse("appName", "parquet_merge")
+    val inputParquetPath = paramMap.getOrElse("inputParquetPath", throw MissingParameterException("Incorrect Argument provided"))
+    val outputParquetPath = paramMap.getOrElse("outputParquetPath", throw MissingParameterException("Incorrect Argument provided"))
+    val parquetAvgRecordSize = paramMap.getOrElse("parquetAvgRecordSize", "0.1")
+    val targetFileSize = paramMap.getOrElse("targetFileSize", "1024000")
+
+    val spark = SparkUtils.createSparkSession(appName)
+
+    Log.info("created  SparkSession...")
+
+    try {
+
+      val inputParquetDF = spark.read.parquet(inputParquetPath)
+
+      val batchRecords = inputParquetDF.count()
+
+      val coalesceNum = calculateCoalesceNum(batchRecords, parquetAvgRecordSize.toLong, targetFileSize.toLong)
+
+      val outputParquetDF = inputParquetDF.coalesce(coalesceNum)
+
+      outputParquetDF.write.mode("overwrite").parquet(outputParquetPath)
+
+    } catch {
+      case se: SparkException =>
+        Log.error(se.getMessage)
+        se.printStackTrace()
+        println("Exception caught: " + se.getMessage)
+      case e: Exception =>
+        e.printStackTrace()
+        Log.error(e.getMessage)
+        System.exit(1)
+    }
+    Log.info("Exiting Parquet Merge Driver...")
+    spark.stop()
+  }
+
+  def calculateCoalesceNum(batchRecords: Long, parquetAvgRecordSize:Long, targetFileSize: Long): Int = {
+    Log.info("********* targetFileSize ****** " + targetFileSize)
+    Log.info("********* parquetAvgRecordSize ****** " + parquetAvgRecordSize)
+
+    var coalesceNum = 1
+    val finalPartition = (batchRecords * parquetAvgRecordSize) / targetFileSize
+
+    if (finalPartition <= 1) {
+      return coalesceNum
+    } else {
+      coalesceNum = finalPartition.toInt
+    }
+    coalesceNum
+  }
+  
+  
+  
+    def createSparkSession(appName: String): SparkSession = {
+    Log.info("Starting createSparkSession ...")
+    val sparkConf = new SparkConf()
+      .setAppName(appName)
+
+    val spark = SparkSession.builder
+      .config(sparkConf)
+      .getOrCreate()
+
+    spark
+  }
+  
+  
+   lazy val logger = Logger.getLogger(Log.getClass.getName)
+
+  def info(msg: String): Unit = {
+    logger.info(msg)
+    println(msg)
+  }
+
+  def warn(msg: String): Unit = {
+    logger.warn(msg)
+    println(msg)
+  }
+
+  def error(msg: String): Unit = {
+    logger.error(msg)
+    println(msg)
+  }
+  
+  
+  
+  def getParams(args: Array[String]): collection.immutable.Map[String, String] = {
+    Log.info("Arguments Pasrsing..")
+    if (args.length != 4) {
+      Log.error(s"""
+                   |[appName=appName] [inputParquetPath="path"] [outputParquetPath="path"] [numberOutputFiles=numberOutputFiles]
+                   |""".stripMargin)
+
+      println("Not Enough Arguments Provided")
+      System.exit(1)
+    }
+    try {
+      val params = args.zipWithIndex.map(t => (t._1.split("=")(0), t._1.split("=")(1))).toMap
+      params
+    } catch {
+      case e: IllegalArgumentException =>
+        e.printStackTrace()
+        Log.warn(e.getMessage)
+        Log.error("Illegal input arguments, Parsing Parameters Failed" + args.mkString(" "))
+        System.exit(1)
+        Map()
+    }
+  }
+  
+  
+  import sbt.Keys.libraryDependencies
+
+name := "parquet_merge"
+
+version := "0.1"
+
+scalaVersion := "2.11.8"
+
+val sparkVersion = "2.2.0"
+libraryDependencies ++= Seq(
+  "org.apache.spark" %% "spark-hive" % sparkVersion % "provided"
+)
