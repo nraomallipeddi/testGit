@@ -1,0 +1,93 @@
+import org.apache.log4j.Logger
+import org.apache.spark.SparkConf
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.functions._
+//import org.json4s._
+//import org.json4s.jackson.Serialization
+//import org.json4s.jackson.Serialization.{read, write}
+
+object testDS2 {
+
+  val Log = Logger.getLogger("test DS1 ...")
+
+  case class Child(id: Option[String], name: Option[String], age: Option[Int])
+  case class Address(id: Option[String], street: Option[String], city: Option[String])
+  case class Person(id: Option[String], name: Option[String])
+  case class Persons1(id: String, persons: List[Option[Person]], children: List[Option[Child]])
+  case class Persons2(id: String, persons: List[Option[Person]], children: List[Option[Child]], addresses: List[Option[Address]])
+
+  def main(args: Array[String]): Unit = {
+
+    val conf = new SparkConf()
+      .setMaster("local[2]")
+      .setAppName("kafka_test")
+
+    val spark = SparkSession
+      .builder()
+      .config(conf)
+      .getOrCreate()
+
+    import spark.implicits._
+
+    val childDF = Seq(Child(Some("person1"), Some("person1-child1"), Some(10)), Child(Some("person1"), Some("person1-child2"), Some(6)), Child(Some("person2"), Some("person2-child1"), Some(11)), Child(Some("person2"), Some("person2-child2"), Some(7)), Child(Some("person2"), Some("person2-child3"), Some(4))).toDF().as[Child]
+    println("childDF details...")
+    println(childDF.printSchema())
+    println(childDF.show(false))
+    childDF.map(_.getClass.getName).show(false)
+
+    val addressDF = Seq(Address(Some("person1"), Some("person1-street1"), Some("person1-city1")), Address(Some("person1"), Some("person1-street2"), Some("person1-city2")), Address(Some("person1"), Some("person1-street3"), Some("person1-city3")), Address(Some("person2"), Some("person2-street1"), Some("person2-city1")), Address(Some("person2"), Some("person2-street2"), Some("person2-city2"))).toDF().as[Address]
+    println("addressDF details...")
+    println(addressDF.printSchema())
+    println(addressDF.show(false))
+    addressDF.map(_.getClass.getName).show(false)
+
+    val personDF = Seq(Person(Some("person1"), Some("person1-name")), Person(Some("person2"), Some("person2-name"))).toDF().as[Person]
+    println("personDF details...")
+    println(personDF.printSchema())
+    println(personDF.show(false))
+    personDF.map(_.getClass.getName).show(false)
+
+    val twoJoinDF = personDF.join(childDF, personDF("id") === childDF("id"))
+    println("twoJoinDF details...")
+    println(twoJoinDF.printSchema())
+    println(twoJoinDF.show(false))
+
+    val udPerson = udf((id: String, name: String) => { Person(Some(id), Some(name))})
+    val udChild = udf((id: String, name: String, age: Int) => { Child(Some(id), Some(name), Some(age))})
+    val udAddress = udf((id: String, street: String, city: String) => { Address(Some(id), Some(street), Some(city))})
+
+    println("twoJoinDF Grouping ...")
+
+    val finalTwoJoinDF = twoJoinDF.select(personDF("id"), udPerson(personDF("id"), personDF("name")).as("persons"), udChild(childDF("id"), childDF("name"), childDF("age")).as("children"))
+      .groupBy($"id")
+      .agg(collect_set($"persons").as("persons"), collect_set($"children").as("children")).toDF().as[Persons1]
+//val finalTwoJoin = twoJoin.select(personDF("id").as("id"), udPerson(personDF("id"), personDF("name")).as("persons"))
+//  .groupBy($"id")
+//  .agg(collect_set($"persons"))
+    println("twoJoinDF Grouping details...")
+    println(finalTwoJoinDF.printSchema())
+    println(finalTwoJoinDF.show(false))
+
+    val threeJoinDF = twoJoinDF.join(addressDF, personDF("id") === addressDF("id"))
+    println("threeJoinDF details...")
+    println(threeJoinDF.printSchema())
+    println(threeJoinDF.show(false))
+
+    println("threeJoin Grouping ...")
+
+    val finalThreeJoinDF = threeJoinDF.select(personDF("id"), udPerson(personDF("id"), personDF("name")).as("persons")
+      , udChild(childDF("id"), childDF("name"), childDF("age")).as("children")
+      , udAddress(addressDF("id"), addressDF("street"), addressDF("city")).as("addresses"))
+      .groupBy($"id")
+      .agg(collect_set($"persons").as("persons")
+        , collect_set($"children").as("children")
+        , collect_set($"addresses").as("addresses")).toDF().as[Persons2]
+    println("threeJoin Grouping details...")
+    println(finalThreeJoinDF.printSchema())
+    println(finalThreeJoinDF.show(false))
+
+//    implicit val formats = Serialization.formats(NoTypeHints)
+//    val ser = write(finalThreeJoinDF)
+//    println(ser)
+  }
+}
