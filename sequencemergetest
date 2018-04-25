@@ -1,0 +1,175 @@
+import java.text.SimpleDateFormat
+import java.util.{Calendar, Date, TimeZone}
+import java.lang._
+
+import org.apache.hadoop.fs.{FileSystem, Path}
+import org.joda.time.DateTime
+
+import scala.collection.mutable.ArrayBuffer
+
+val now = Calendar.getInstance().getTime()
+
+val hourFormat = new SimpleDateFormat("HH")
+
+val currentHour = Integer.parseInt(hourFormat.format(now))
+
+val hour = (currentHour - 22)
+
+"%02d".format(hour)
+//https://alvinalexander.com/scala/scala-get-current-date-time-hour-calendar-example
+
+//val str = "/data/2018/04/25/22"
+//val str = "/data/2018/04/25"
+val str = "/data/2018/04"
+val separator = "/"
+
+var arr = str.split(separator, -1)
+
+arr.length
+var yr = ""
+var mon = ""
+var day = ""
+var hr = ""
+if (arr.length == 6){
+  yr = arr(2)
+  mon = arr(3)
+  day = arr(4)
+  hr = arr(5)
+}
+
+yr
+mon
+day
+hr
+
+def validatePath(hdfsLocation: String): Boolean = {
+  val conf = sc.hadoopConfiguration
+  val fs = FileSystem.get(conf)
+  fs.exists(new Path(hdfsLocation))
+  //TBD
+}
+
+def buildTargetPath(arr: Array[String]): String = {
+  var trgPath = ""
+  for (i <- 1 to arr.length - 1) {
+    if (i == 2)
+      trgPath += "/year=" + arr(i)
+    else if (i == 3)
+      trgPath += "/month=" + arr(i)
+    else if (i == 4)
+      trgPath += "/day=" + arr(i)
+    else if (i == 5)
+      trgPath += "/hr=" + arr(i)
+    else
+      trgPath += "/" + arr(i)
+  }
+
+  validatePath(trgPath)
+
+  trgPath
+}
+
+def daysOfMonth(year: Int, month: Int) = {
+  val dateTime = new DateTime(year, month, 1, 12, 0, 0, 0)
+  dateTime.dayOfMonth.getMaximumValue
+}
+
+def isPathExist(hdfsLocation: String): Boolean = {
+  val conf = sc.hadoopConfiguration
+  val fs = FileSystem.get(conf)
+  fs.exists(new Path(hdfsLocation))
+}
+
+def containsFiles(hdfsLocation: String): Boolean = {
+  val conf = sc.hadoopConfiguration
+  val fs = FileSystem.get(conf)
+  var ret = fs.exists(new Path(hdfsLocation))
+
+  if (ret) {
+    ret = false
+    val iter = fs.listFiles(new Path(hdfsLocation), false)
+    while (iter.hasNext()) {
+      val f = iter.next().getPath().getName
+      if (!f.equals("_SUCCESS")) {
+        ret = true
+      }
+    }
+  }
+  ret
+}
+
+def mergeAndCopySeqFiles(srcPath: String, dstPath: String, mergeFile: String): Unit =  {
+  import org.apache.hadoop.fs.{FileSystem, FileUtil, Path}
+  import org.apache.hadoop.hdfs.HdfsConfiguration
+  import org.apache.hadoop.conf.Configuration
+  import java.net.URI
+
+//  val config = new Configuration()
+  val config = sc.hadoopConfiguration
+  //config.set("fs.s3.impl", "org.apache.hadoop.fs.s3.S3FileSystem")
+  val fs = FileSystem.get( URI.create(srcPath), config)
+  FileUtil.copyMerge(fs, new Path(srcPath), fs, new Path(dstPath, mergeFile), false, config, null)
+}
+
+var trgPath = ""
+val hrs = Array("00","01","02","03","04","05","06","07","08","09",
+  "10","11","12","13","14","15","16","17","18","19",
+  "20","21","22","23")
+
+val days28 = Array("01","02","03","04","05","06","07","08","09",
+  "10","11","12","13","14","15","16","17","18","19",
+  "20","21","22","23","24","25","26","27","28")
+
+val days29 = Array("01","02","03","04","05","06","07","08","09",
+  "10","11","12","13","14","15","16","17","18","19",
+  "20","21","22","23","24","25","26","27","28","29")
+
+val days30 = Array("01","02","03","04","05","06","07","08","09",
+  "10","11","12","13","14","15","16","17","18","19",
+  "20","21","22","23","24","25","26","27","28","29","30")
+
+val days31 = Array("01","02","03","04","05","06","07","08","09",
+  "10","11","12","13","14","15","16","17","18","19",
+  "20","21","22","23","24","25","26","27","28","29","30","31")
+
+
+if (arr.length == 6) {
+  trgPath = buildTargetPath(arr)
+}
+else if (arr.length == 5){
+  for(hr <- hrs){
+    //    arr :+= hr
+    val srcPath = str + "/" + hr
+    if (containsFiles(srcPath)){
+      val arr1 = arr :+ hr
+      trgPath = buildTargetPath(arr1)
+      val mergeFile = "mergesequencefile_" + arr1(2) + "_" + arr1(3) + "_" + arr1(4) + "_" + arr1(5)
+      mergeAndCopySeqFiles(srcPath, trgPath, mergeFile)
+    }
+  }
+}
+else if (arr.length == 4){
+  val noDays = daysOfMonth(arr(2).toInt, arr(3).toInt)
+  var days = Array("")
+  if (noDays == 28)
+    days = days28
+  else if (noDays == 29)
+    days = days29
+  else if (noDays == 30)
+    days = days30
+  else if (noDays == 31)
+    days = days31
+
+  for (day <- days) {
+    for (hr <- hrs) {
+      val srcPath = str + "/" + hr
+      if (containsFiles(srcPath)){
+        val arr1 = arr :+ day :+ hr
+        trgPath = buildTargetPath(arr1)
+        val mergeFile = "mergesequencefile_" + arr1(2) + "_" + arr1(3) + "_" + arr1(4) + "_" + arr1(5)
+        mergeAndCopySeqFiles(srcPath, trgPath, mergeFile)
+      }
+    }
+  }
+}
+trgPath
