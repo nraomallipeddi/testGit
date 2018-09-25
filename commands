@@ -1,0 +1,18 @@
+spark-submit --verbose --master yarn --deploy-mode client --driver-memory 2g --num-executors 1 --executor-memory 2g --executor-cores 1
+--conf "spark.executor.extraClassPath=/etc/hbase/conf:/opt/cloudera/parcels/CDH/lib/hbase:/opt/cloudera/parcels/CDH/jars:/etc/hive/conf
+--conf "spark.driver.extraClassPath=/etc/hbase/conf:/opt/cloudera/parcels/CDH/lib/hbase:/opt/cloudera/parcels/CDH/jars:/etc/hive/conf
+--class org.class /test/test.jar --jars <any dpendency jars> >> /home/test.log 2>&1
+
+kafka version
+
+cd /opt/cloudera/parcels/KAFKA-2.2.0-1.2.2.0/bin or cd /opt/cloudera/parcels/KAFKA/bin
+/opt/cloudera/parcels/KAFKA/bin/kafka-topics --list --zookeeper ip:2181
+./kafka-topics --create --zookeeper ip:2181 --replication-factor 1 --partitions 1 --topic test_topic
+./kafka-topics --describe --zookeeper ip:2181 --topic test_topic
+./kafka-console-producer --broker-list ip:9092 --topic test_topic
+./kafka-console-consumer --zookeeper ip:2181 --topic test_topic --from-beginning
+./kafka-console-consumer --botstrap-server ip:9092 --topic test_topic --from-beginning
+
+java jar 
+
+spark2-shell --jars /home/snappy-java-1.1.4.jar --spark.executor.UseClassPathFirst=true --spark.executor.extraClassPath=snappy-java-1.1.4.jar
