@@ -16,3 +16,278 @@ cd /opt/cloudera/parcels/KAFKA-2.2.0-1.2.2.0/bin or cd /opt/cloudera/parcels/KAF
 java jar 
 
 spark2-shell --jars /home/snappy-java-1.1.4.jar --spark.executor.UseClassPathFirst=true --spark.executor.extraClassPath=snappy-java-1.1.4.jar
+
+
+
+--------------------
+KafkaClient {
+   com.sun.security.auth.module.Krb5LoginModule required
+   useTicketCache=true
+   renewTicket=true
+   serviceName="kafka";
+};
+Client {
+   com.sun.security.auth.module.Krb5LoginModule required
+   useTicketCache=true
+   renewTicket=true
+   serviceName="zookeeper";
+};
+
+
+KafkaClient {
+ com.sun.security.auth.module.Krb5LoginModule required
+ doNotPrompt=true
+ useTicketCache=true
+ principal="user@TEST.COM"
+ useKeyTab=true
+ serviceName="kafka"
+ keyTab="/home/user/user.keytab"
+ client=true;
+};
+
+KafkaClient {
+     com.sun.security.auth.module.Krb5LoginModule required
+     useKeyTab=true
+     keyTab="/home/user/user.keytab"
+     storeKey=true
+     useTicketCache=false
+     serviceName="kafka"
+     principal="user@TEST.COM";
+    };
+
+KafkaClient {
+ com.sun.security.auth.module.Krb5LoginModule required
+ useTicketCache=true
+ useKeyTab=false;
+};
+
+/etc/kafka/conf/kafka_client_jaas.conf
+/usr/hdp/current/kafka-broker/conf/kafka_client_jaas.conf 
+
+/home/user/kafka_client_cedm_jaas.conf 
+/etc/krb5.conf 
+
+/usr/hdp/current/kafka-broker/bin/kafka-console-producer.sh --broker-list testt.net:9092,testt.net:9092 --topic TOLAMNRT4 -security-protocol PLAINTEXTSASL
+
+/usr/hdp/current/kafka-broker/bin/kafka-console-consumer.sh --topic TOLAMNRT4 --zookeeper host1d.sys.test.net:2181,host2d.sys.test.net:2181 --from-beginning  -security-protocol PLAINTEXTSASL 
+kinit -kt /home/userr/userr.keytab userr@TEST.COM 
+
+
+java -Djava.security.auth.login.config=/home/kafka-user/kafka-jaas.conf \
+-Djava.security.krb5.conf=/etc/krb5.conf \
+-Djavax.security.auth.useSubjectCredsOnly=true \
+-cp hdp-kafka-sample-1.0-SNAPSHOT.jar:/usr/hdp/current/kafka-broker/libs/* \
+
+java -Djava.security.auth.login.config=/home/user/kafka_client_cedm_jaas.conf  -Djava.security.krb5.conf=/etc/krb5.conf -Djavax.security.auth.useSubjectCredsOnly=true -cp "/home/user/jobs/data_ingestion/jars/*" com.test.cedm.JdbcQueryAndPublishKafka $CONFIG_LOCATION/&CONFIG_FILE AFFILIATE
+
+--------------
+public class JdbcQueryAndPublishKafka  {
+	private static final Logger log = Logger.getLogger(JdbcQueryAndPublishKafka.class);
+    private boolean completed =false;
+	private String topic;
+	
+	private Connection connection;
+	private String tablename;
+	private String query;
+	private long queryInterval;
+	private String partition_key;
+	private static String jobType;
+    Producer<String, String> producer = null;
+ 
+    String lastProcessedDateFile;
+    String increamentalColumn;
+    QueryProperties queryProp;
+    int totalpublisMsg;
+    PreparedStatement preparedStmt = null;
+    Properties connectionProp = null;
+
+    
+    public JdbcQueryAndPublishKafka(String configFile, String tablename) throws Exception {
+    	
+            	
+    	queryProp = new QueryProperties();
+    
+    	connectionProp =    queryProp.loadAbsolutePathProperties(configFile);
+    	initializeLogger(connectionProp.getProperty("log4j.file.name"),tablename);
+    	jobType = connectionProp.getProperty("job.type","nrt");
+    	log.info("Started");
+		  this.connection = JdbcConnection.getConnection(connectionProp);
+		  topic=connectionProp.getProperty("kafka.topic");
+		  totalpublisMsg = Integer.parseInt(connectionProp.getProperty("kafka.totalpublishMsg"));
+	        Properties kafkaProps = new Properties();
+	         kafkaProps.put("metadata.broker.list", connectionProp.getProperty("metadata.broker.list"));
+	         kafkaProps.put("zookeeper.connect",connectionProp.getProperty("zookeeper.connect"));
+	         kafkaProps.put("serializer.class",connectionProp.getProperty("serializer.class"));
+	         kafkaProps.put("partitioner.class", connectionProp.getProperty("partitioner.class"));
+	         kafkaProps.put("request.required.acks", connectionProp.getProperty("request.required.acks"));
+	         kafkaProps.put("message.max.bytes", connectionProp.getProperty("request.required.acks"));
+	         kafkaProps.put("security.protocol", "SASL_PLAINTEXT");   	
+	         
+	        ProducerConfig config = new ProducerConfig(kafkaProps);
+		       producer = new Producer<String, String>(config);
+		       
+		   List<String> tableObjects = QueryProperties.getTables(
+				                  connectionProp.getProperty("jdbc.table.object_file"));
+		    
+		         
+		    boolean tableFound=false;    
+     		for (int i = 0; i < tableObjects.size(); i++) {
+     	  		queryProp.setQueryParameter(tableObjects.get(i));
+     	  		 if (queryProp.getTable().equals(tablename)){
+     	  			query = queryProp.getQuery();
+     	  			partition_key = queryProp.getPartitionKey();
+     	  			queryInterval = Long.parseLong(queryProp.getInterval());
+     	  			this.tablename=tablename;
+     	  			lastProcessedDateFile = queryProp.getLastProcessedFile(connectionProp.getProperty("last.processed.file.dir"));
+     	  			increamentalColumn = queryProp.getIncreamentalColumn();
+     	  			tableFound=true;
+     	  			break;
+     	  		 }
+     			}   
+           		
+     		 if(!tableFound)
+     		  throw new Exception ("No Table Matches");
+     }
+    		
+	 		  
+    public static void main(String arg[]) throws Exception {
+   	 try {
+    	JdbcQueryAndPublishKafka kakfaPublish = new JdbcQueryAndPublishKafka(arg[0],arg[1]);
+    	if(jobType.equals("nrt")) {
+    	for (;;) {
+    	if(kakfaPublish.completed){
+			 System.out.println( " sleeping");
+			 Thread.sleep(kakfaPublish.queryInterval);
+	      }
+    	   kakfaPublish.queryAndPublish();
+    	}} else {
+    	   kakfaPublish.queryAndPublish();
+    	}
+    		
+   	 } catch(Exception ex) { 
+   		 log.info(ex.getLocalizedMessage());
+   		 ex.printStackTrace();
+   	     throw ex;
+   	 }
+   }
+	 
+	public void queryAndPublish() throws Exception{
+					
+        if(connection != null && !connection.isClosed()){
+         try {
+     
+        	
+        	 String t1=null;
+        	  preparedStmt = connection.prepareStatement(query);
+        	  if(jobType.equals("nrt")) {
+        		  t1= queryProp.getLastProcessedDate(lastProcessedDateFile);
+         	   preparedStmt.setString(1, t1);
+        	   preparedStmt.setString(2, t1);
+        	   }
+         	  
+        	  log.info(" Query started for start date " + t1 + " " + new SimpleDateFormat("yyyyMMdd_HHmmss").format(Calendar.getInstance().getTime())); 
+	         ResultSet rs = preparedStmt.executeQuery();
+              rs.setFetchSize(Integer.parseInt(connectionProp.getProperty("rowset.fetch.size")));
+              log.info( " Query end " + new SimpleDateFormat("yyyyMMdd_HHmmss").format(Calendar.getInstance().getTime()));
+  	        List<KeyedMessage<String,String>> buffer = new ArrayList<KeyedMessage<String,String>>();
+  	        int count=0;
+  	        int totalcount=0;
+  	        while(rs.next()){
+	           JSONObject json = new JSONObject();  
+	              json.put("table", tablename);
+	                  
+	                	 ResultSetMetaData rsmd = rs.getMetaData();
+	                	 JSONObject value = new JSONObject();
+	                	   for(int col=1; col <= rsmd.getColumnCount(); col++){
+	                		    Object returnValue = QueryProperties.getDataByCol(rs, rsmd.getColumnTypeName(col), col);
+	                		     value.put(rsmd.getColumnName(col), returnValue);
+	                       }
+	                	   json.put("value",value);
+	                	   t1=rs.getString(increamentalColumn) ; 
+	                	  try{ 
+	                	   KeyedMessage<String, String> data = new KeyedMessage<String, String>(topic,partition_key, json.toString());
+	                	   buffer.add(data);    
+	                	   count++;
+		                   if(buffer.size() > totalpublisMsg) {
+		                       producer.send(buffer);
+		                       if(jobType.equals("nrt")) { 
+		                        queryProp.updateLastProcessedTime(lastProcessedDateFile,t1);
+		                        log.info("Last processed file updated with the value  " + t1);
+		                       } 
+		                        totalcount+=count;
+		                        count=0;
+		                        buffer.clear();
+		                     } 
+	                	  }catch (Exception e) {
+			                     e.printStackTrace();
+			                    log.error("Kafka publish Exception " +e.getLocalizedMessage());
+			                     throw e;
+			               }
+	                	
+	                }
+  	      
+	                if( count < totalpublisMsg) {
+                     	log.info("Fulshing lesser last " + count + " records to kafka " +  new SimpleDateFormat("yyyyMMdd_HHmmss").format(Calendar.getInstance().getTime()));
+                     	try {
+                        	producer.send(buffer);
+                        	log.info("Fulshed " + count + " records to kafka " +  new SimpleDateFormat("yyyyMMdd_HHmmss").format(Calendar.getInstance().getTime()));
+                        if(jobType.equals("nrt")) {
+                         queryProp.updateLastProcessedTime(lastProcessedDateFile,t1); 
+                         log.info("Last processed file updated with the value  " + t1);
+                        } 
+                        totalcount+=count;
+                        count=0;
+                     
+                         buffer.clear();
+                         
+                     	} catch (Exception e) {
+                     		 log.error("Kafka publish Exception " +e.getLocalizedMessage());
+      			           
+		                     throw e;
+                     	}
+	                 log.info("total published msg " + totalcount);
+	               completed = true;
+	                }
+	              }catch (SQLException e) {
+	            	log.info(e.getMessage() ); e.printStackTrace();
+	            }finally {
+	                  if(preparedStmt!=null)
+	                    try {
+	                    	preparedStmt.close();
+	                    } catch (SQLException e) {
+	                    	log.info(e.getMessage());
+	                    	e.printStackTrace();
+	                    	System.exit(1);
+	                    }
+	            }
+	        } else {
+	        	try { 
+	        	this.connection = JdbcConnection.getConnection(connectionProp);
+	        	}catch(Exception e){
+	        		e.printStackTrace();
+	        		System.exit(1);
+	            }
+	        	 
+	        }
+              
+	    }
+	  
+	private  void initializeLogger(String LOG_PROPERTIES_FILE,String filename)
+	  {
+	    Properties logProperties = new Properties();
+
+	    try
+	    {
+	      logProperties.load(new FileInputStream(LOG_PROPERTIES_FILE));
+	      logProperties.setProperty("log4j.appender.RollingAppender.File", logProperties.getProperty("log4j.appender.RollingAppender.File") + filename );
+	      
+	      PropertyConfigurator.configure(logProperties);
+	      log.info("Logging initialized.");
+	    }
+	    catch(IOException e)
+	    {
+	      throw new RuntimeException("Unable to load logging property " + LOG_PROPERTIES_FILE);
+	    }
+	  }
+	}
+	}
