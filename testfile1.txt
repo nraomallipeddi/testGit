@@ -14,13 +14,13 @@
 		TimeZone timeZone = TimeZone.getTimeZone("Etc/UTC");
 		Calendar calendar = Calendar.getInstance(timeZone);
 
+
 		arguments.put(Constant.START_TIME, calendar.getTime().getTime() + "");
 
 		return arguments;
 	}
 	
 	public static void main(String[] args) throws SQLException, IOException, ParseException {
-
 		// Parse Spark specific runtime arguments
 		Map<String,String> arguments = parseArgs(args);
 		arguments.put(Constant.JOB_NAME, "SparkAnalysis");
@@ -68,7 +68,7 @@
         <param name="append" value="false" />
         <param name="maxFileSize" value="10MB" />
         <param name="maxBackupIndex" value="10" />
-        <param name="File" value="/home/nmalli002c/catena/catena_sparklogs/application.log" />
+        <param name="File" value="/home/nmalli/sparklogs/application.log" />
         <layout class="org.apache.log4j.PatternLayout">
             <param name="ConversionPattern"
                    value="%d{yyyy-MM-dd HH:mm:ss} %-5p %c{3}:%l - %m%n" />
