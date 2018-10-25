@@ -1,2 +1,90 @@
-TESTFILE1
-parquetAvgRecordSize
+	private static Map<String,String> parseArgs(String[] args) {
+
+		Map<String,String> arguments = new HashMap<String,String>();
+		if (args != null) {
+			for (String arg:args) {
+				if (arg != null && arg.indexOf("=") != -1) {
+					String[] param = arg.split("=");
+					arguments.put(param[0], param[1]);
+				}
+			}
+		}
+
+		//Find start time in UTC and put it in Map
+		TimeZone timeZone = TimeZone.getTimeZone("Etc/UTC");
+		Calendar calendar = Calendar.getInstance(timeZone);
+
+		arguments.put(Constant.START_TIME, calendar.getTime().getTime() + "");
+
+		return arguments;
+	}
+	
+	public static void main(String[] args) throws SQLException, IOException, ParseException {
+
+		// Parse Spark specific runtime arguments
+		Map<String,String> arguments = parseArgs(args);
+		arguments.put(Constant.JOB_NAME, "SparkAnalysis");
+		arguments.put("env", "dev");
+		long currentTime= currentTime();
+
+		SparkContext sc = new SparkContext(new SparkConf().setAppName(arguments.get(Constant.JOB_NAME)));
+		HiveContext hiveContext = initializeHiveContext(sc);
+
+		AccumuloUtils accumuloUtils = new AccumuloUtils(Accumulo.valueOf(arguments.get("env")));
+
+		ACTIVATION_JOURNEY_LEG(sc, hiveContext, arguments, currentTime, accumuloUtils);
+
+	}
+	
+	public class Constant {
+	
+	public static String START_TIME = "START_TIME";
+	
+	public static String JOB_NAME ="JOB_NAME";
+	}
+	
+	---------------------
+	
+	 def main(args: Array[String]): Unit = {
+    if(args.length < 10) {
+      System.err.println("Usage: KafkaStreaming <zkQuorum> <bootStrapServers> <group> <topics> <source> <numthreads> <kafkaPartitionCount> <streamingintveral> <dataoutputdir> <rmaddress> <matrixserviceendpoint> <columnfamily> <env>")
+      System.exit(1)
+    }
+	------------------------
+	
+	<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE log4j:configuration SYSTEM "log4j.dtd">
+<log4j:configuration debug="true"
+                     xmlns:log4j='http://jakarta.apache.org/log4j/'>
+
+    <appender name="console" class="org.apache.log4j.ConsoleAppender">
+        <layout class="org.apache.log4j.PatternLayout">
+            <param name="ConversionPattern"
+                   value="%d{yyyy-MM-dd HH:mm:ss} %-5p %c{3}:%l - %m%n" />
+        </layout>
+    </appender>
+
+    <appender name="fileappender" class="org.apache.log4j.RollingFileAppender">
+        <param name="append" value="false" />
+        <param name="maxFileSize" value="10MB" />
+        <param name="maxBackupIndex" value="10" />
+        <param name="File" value="/home/nmalli002c/catena/catena_sparklogs/application.log" />
+        <layout class="org.apache.log4j.PatternLayout">
+            <param name="ConversionPattern"
+                   value="%d{yyyy-MM-dd HH:mm:ss} %-5p %c{3}:%l - %m%n" />
+        </layout>
+    </appender>
+
+    <root>
+        <level value="INFO" />
+        <appender-ref ref="console" />
+        <appender-ref ref="fileappender" />
+    </root>
+
+</log4j:configuration>
+
+
+--------------------------
+
+https://www.themoderncoder.com/a-better-git-workflow-with-rebase/
+
