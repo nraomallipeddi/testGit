@@ -1,0 +1,36 @@
+spark-submit --master yarn --deploy-mode cluster --name TestStreamingProcess --class testclass --conf "spark.executor.extraJavaOptions=-Dconfig.resource=hdfs:///user/testuser/conf/test.conf" --conf "spark.driver.extraJavaOptions=-Dconfig.resource=hdfs:///user/testuser/conf/test.conf" --conf spark.yarn.executor.memoryOverhead=1024 --conf spark.executor.extraClassPath=/etc/hbase/conf:hdfs:///user/tsetuser/conf:/opt/cloudera/parcels/CDH/lib/hbase:/opt/cloudera/parcels/CDH/jars --conf spark.driver.extraClassPath=etc/hbase/conf:hdfs:///user/tsetuser/conf:/opt/cloudera/parcels/CDH/lib/hbase:/opt/cloudera/parcels/CDH/jars --files hdfs:///user/tsetuser/conf/test.conf --jars hdfs:///user/tsetuser/lib/test1.jar,/opt/cloudera/parcels/CDH/lib/hbase/hbase-client.jar,/opt/cloudera/parcels/CDH/lib/hbase/hbase-common.jar hdfs:///user/tsetuser/lib/testprocess.jar
+
+---------------------
+#Spark properties
+spark.eventLog.enabled = false
+spark.eventLog.dir = /tmp
+spark.scheduler.mode = FAIR
+spark.memory.useLegacyMode = false
+spark.yarn.executor.memoryOverhead = 4096
+spark.network.timeout = 1200
+spark.rpc.askTimeout = 1200
+spark.rpc.lookupTimeout = 1200
+spark.executor.heartbeatInterval = 30
+spark.rpc.numRetries = 6
+spark.task.maxFailures = 8
+spark.sql.shuffle.partitions = 201
+---------------
+#Spark Streaming properties
+spark.eventLog.enabled = false
+spark.eventLog.dir = /tmp
+spark.scheduler.mode = FAIR
+spark.memory.useLegacyMode = false
+spark.yarn.executor.memoryOverhead = 4096
+spark.network.timeout = 1200
+spark.rpc.askTimeout = 1200
+spark.rpc.lookupTimeout = 1200
+spark.executor.heartbeatInterval = 30
+spark.rpc.numRetries = 6
+spark.task.maxFailures = 8
+spark.sql.shuffle.partitions = 201
+spark.sql.tungsten.enabled = true
+spark.sql.ui.retainedExecutions = 10
+spark.shuffle.manager = SORT
+spark.hadoop.mapred.output.compress = false
+spark.streaming.kafka.maxRatePerPartition = 1000
+spark.broadcast.factor = org.apache.spark.broadcast.HttpBroadcastFactory
