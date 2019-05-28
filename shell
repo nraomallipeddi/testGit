@@ -1,0 +1,1103 @@
+---config.ini------------------
+[GLOBAL]
+BASEDIR=/home/`whoami`/jobs/data_ingestion/splunk
+CURL='/usr/bin/curl' 
+SPLUNK_USER="username" 
+SPLUNK_PASSWORD="pwd" 
+SPLUNKHTTP="http://host:8089/services/search/jobs/export"
+file_extn=csv
+hdfs_dir=/db/tenancy/prep
+archive_dir=/db/tenancy/splunk_archive
+
+[SPLUNK_START]
+STG_TABLE_NAME=splunk_start
+src_file_nm=Splunk_Start_
+raw_src_file_nm=raw_Splunk_Start_
+splunk_logs_landing_dir=/home/`whoami`/landing/x1_splunk/splunk_start
+
+[SPLUNK_END]
+STG_TABLE_NAME=splunk_end
+src_file_nm=Splunk_End_
+raw_src_file_nm=raw_Splunk_End_
+splunk_logs_landing_dir=/home/`whoami`/landing/x1_splunk/splunk_end
+
+[SPLUNK_QUERIES]
+splunk_start_search_query=sourcetype=test | table "timestamp_src" "hostName" "sourceName" "eventName"
+splunk_end_search_query=sourcetype=test | table "timestamp_src" "hostName" "sourceName" "eventName"
+
+---source_to_prep_ingestion.sh-------------------
+# Return Codes:
+#    0   - sucessful execution
+#    101 - a required command line input is either missing or invalid
+#    102 - an unrecognized input switch was provided
+#    103 - could not create temporary log file
+#    104 - a required variable was not defined in the INI_FILE
+#    105 - could not remove an old log file
+#    106 - the Lock file (LOCK_FILE) is not writable
+#    107 - the Lock file (LOCK_FILE) already exists.  A previous scheduled
+#          processes is either still running or has failed mid-stream
+#    110 - the High Water Mark file (HWM_FILE) does not exist
+#    111 - the High Water Mark file (HWM_FILE) is not writable
+#    112 - the Log Directory (LOG_DIR) does not exist
+#    113 - the archive subdirectory of the Log Directory (LOG_DIR/archive) does not exist
+#    114 - the Log Directory (LOG_DIR) is not writable
+#    115 - the archive subdirectory of the Log Directory (LOG_DIR/archive) is not writable"
+#    116 - could not remove LOCK_FILE after completion
+#    117 - could not ceate LOCK_FILE after initializations
+#    118 - could not read current High Water Mark
+#    127 - an INI configured data directory is missing
+#    128 - could not clear existing partition
+#    129 - could not copy file
+#    130 - could not remove directory
+#    131 - could not remove files from directory
+#    132 - could not move file
+#    133 - Hive exited with non-zero return code
+#    134 - could not create directory
+
+export HADOOP_OPTS=-Djava.security.egd=file:/dev/../dev/urandom;
+# Let's pull in the common functions library
+cd /opt/se/difa/config/
+FUNCTIONS_SRC="functions.inc"
+source ../config/${FUNCTIONS_SRC}
+if [ ${?} -ne 0 ]
+then
+   echo "********** ERROR **********"
+   echo "UNABLE TO SOURCE THE COMMON FUNCTIONS FILE LOCATED AT: ${FUNCTIONS_SRC}"
+   exit 150
+fi
+
+LOGGER I "********** BEGIN PROCESS **********"
+LOGGER I "Full command line: ${0} ${*}"
+LOGGER I "The current unix pid is ${CURPID}"
+
+# Parse the command line options provided
+LOGGER I "Begin -  parse command line options with getopts"
+while getopts :i:s:o:m:t: OPTIONS
+do
+    case ${OPTIONS} in
+      i)  SPLUNK_INI_FILE=${OPTARG};;
+      s)  SPLUNK_INI_SECTION=${OPTARG};;
+      t)  table_id=${OPTARG};;
+      \?) LOGGER E "********** ERROR **********"
+          LOGGER E "An invalid switch was supplied: ${OPTARG}"
+          LOGGER E "The script was executed with the following input: '${OPTINPUT}'"
+          PROGRAM_USAGE
+          FAILURE 102;;
+    esac
+done
+LOGGER I "End - parse command line options with getopts"
+
+LOGGER I "SPLUNK_INI_FILE : ${SPLUNK_INI_FILE}"
+LOGGER I "SPLUNK_INI_SECTION : ${SPLUNK_INI_SECTION}"
+LOGGER I "table_id : ${table_id}"
+
+export BASE_HDFS_INI_LOCATION="/tmp/difa"
+export BASE_HDFS_HSQL_LOCATION="/db/aps/conf/difa"
+export EDGENODE_INI_LOCATION="/etc/se/difa"
+
+# Done defining the functions
+inifile=$(hadoop fs -ls ${BASE_HDFS_INI_LOCATION} | grep "/${table_id}_" | awk -F" " '{print $NF}')
+echo $inifile
+
+if [ $(echo $inifile|wc -c) -ne $(echo $inifile|sed 's/ //g'|wc -c) ]; then
+   echo "********** ERROR **********"
+   echo "THERE EXISTS MULTIPLE INI FILES IN HDFS, FOR THE SAME TABLE_ID=${table_id} !!"
+   echo "DIFA ERROR CODE:291"
+   exit 291
+fi
+
+edgenode_inifile=`find ${EDGENODE_INI_LOCATION} -name "${table_id}_*.ini"`
+if [ $(echo $edgenode_inifile|wc -c) -ne $(echo $edgenode_inifile|sed 's/ //g'|wc -c) ]; then
+   echo "********** ERROR **********"
+   echo "THERE EXISTS MULTIPLE INI FILES FOR THE SAME TABLE_ID=${table_id} in EDGENODE!!"
+   echo "DIFA ERROR CODE:119"
+   exit 119
+fi
+edgenode_inifile_len=$(echo ${edgenode_inifile}|sed 's/ //g'|wc -c)
+echo "edgenode_inifile=$edgenode_inifile"
+echo "edgenode_inifile_len=$edgenode_inifile_len"
+
+rm -f $edgenode_inifile
+hadoop fs -copyToLocal ${inifile} ${EDGENODE_INI_LOCATION}
+if [ ${?} -ne 0 ]
+then
+   echo "********** ERROR **********"
+   echo "hadoop fs -copyToLocal ${inifile} ${EDGENODE_INI_LOCATION} EXECUTION FAILED!!"
+   echo "UNABLE TO COPY THE HDFS INI FILE TO EDGENODE FOR THE CURRENT RUN!!"
+   echo "DIFA ERROR CODE:295"
+   exit 295
+fi
+
+if [ ${edgenode_inifile_len} -le 1 ]; then 
+    edgenode_inifile=`find ${EDGENODE_INI_LOCATION} -name "${table_id}_*.ini"`
+    if [ $(echo $edgenode_inifile|wc -c) -ne $(echo $edgenode_inifile|sed 's/ //g'|wc -c) ]; then
+       echo "********** ERROR **********"
+       echo "THERE EXISTS MULTIPLE INI FILES FOR THE SAME TABLE_ID=${table_id} in EDGENODE!!"
+       echo "DIFA ERROR CODE:119"
+       exit 119
+    fi
+fi
+
+echo "edgenode_inifile2=$edgenode_inifile"
+
+INI_FILE=$edgenode_inifile
+chmod 777 $INI_FILE
+echo $INI_FILE
+
+
+#################################################################################
+# Start the logical processing
+
+# Set some internal variables
+PROGNAMELONG=`basename $0`                                      # name of the program, minus all of the path info
+PROGNAMESHORT=`echo ${PROGNAMELONG} | sed 's/\.[^.]*$//'`       # name of the program, minus the extension
+DATETIME=`date +%Y%m%d%H%M%S`                                   # datetime stamp yyyymmddhhmiss
+CURPID=$$                              # PID of the current running process (knowing this helps with concurrency)
+USER_ID=`whoami`                                                #generate USERID
+
+
+# Before we can initialize the dynamic log management, we have to parse the
+# command line and INI to set all of the varibale options.  However, we do want
+# to generate a log right immediately so that we can log the process of parsing
+# the command line and INI (to be able to troubleshoot if those steps fail).
+# We'll start by creating a temporary log in the current working directory.
+# 
+# Dynamic log management will be initialized only after a successful read of the 
+# command line and INI options.  Once that is ready, we'll move the log out of
+# current working directory and into the directory structrue defined in the INI.
+
+# check to ensure that the required -i switch for INI_FILE was provided
+CHECK_NULL_VAR INI_FILE "${INI_FILE}" 101
+
+# check to ensure that the required -s switch for INI_SECTION was provided
+#CHECK_NULL_VAR INI_SECTION "${INI_SECTION}" 101
+
+
+# Source global parameters from the INI file
+LOGGER I "BEGIN - READ GLOBAL VARIBALES FROM INI_FILE"
+PARSE_INI ${INI_FILE} GLOBAL
+LOGGER I "END - READ GLOBAL VARIBALES FROM INI_FILE"
+
+# OK, now we need to validate that other expected variables have been set by the INI
+
+# source process-specific parameters from the INI file
+TEMP_LOG_DIR=${TMP_DIR}                                              # just the current working directory
+TEMP_LOG_FILE=${TEMP_LOG_DIR}/${PROGNAMESHORT}_${DATETIME}_${CURPID}.log  # temporary log
+LOG_FILE=${TEMP_LOG_FILE}
+
+touch ${LOG_FILE} > /dev/null 2>&1
+if ! [ -w ${LOG_FILE} ]; then
+    "********** ERROR **********"
+   echo "THE TEMPORARY LOG FILE ${LOG_FILE} IS NOT WRITABLE"
+   echo "CHECK THE LOCATION AND PERMISSIONS AND TRY AGAIN"
+   FAILURE 103
+fi
+
+# check to ensure that the required -i switch for SPLUNK_INI_FILE was provided
+CHECK_NULL_VAR INI_FILE "${SPLUNK_INI_FILE}" 101
+# Confirm that the INI file specified actualy exists
+CHECK_FILE_EXISTS INI_FILE "${SPLUNK_INI_FILE}" 124
+
+# check to ensure that the required -s switch for INI_SECTION was provided
+CHECK_NULL_VAR INI_SECTION "${SPLUNK_INI_SECTION}" 101
+
+# Source global parameters from the INI file
+LOGGER I "Begin - read GLOBAL varibales from SPLUNK_INI_FILE"
+PARSE_INI ${SPLUNK_INI_FILE} GLOBAL
+LOGGER I "End - read GLOBAL varibales from SPLUNK_INI_FILE"
+
+# source process-specific parameters from the INI file
+LOGGER I "Begin - read process-specifc variables from SPLUNK_INI_FILE for SPLUNK_INI_SECTION"
+PARSE_INI ${SPLUNK_INI_FILE} ${SPLUNK_INI_SECTION}
+LOGGER I "End - read process-specific variables from SPLUNK_INI_FILE for SPLUNK_INI_SECTION"
+
+
+# OK, now we need to validate that other expected variables have been set by the INI
+# process, and that access to additional files or directories are as expected
+
+CHECK_NULL_VAR EMAIL "${EMAIL}" 104
+CHECK_NULL_VAR LOG_RETAIN_DAYS "${LOG_RETAIN_DAYS}" 104
+CHECK_NULL_VAR LOG_DIR "${LOG_DIR}" 104
+# Check to ensure the log directory exists
+# note - we could also decide to attempt to create it within the script
+# but my fear is that if the directory disappears, that there might be a
+# larger issue occurring
+CHECK_DIR_EXISTS LOG_DIR "${LOG_DIR}" 112
+
+# OK, now at this point all varaibles and parameters have been set
+# so we'll swiich the logging over to the correct log store.
+
+LOGGER I "Begin - switching temporary log file ${TEMP_LOG_FILE} to managed structure"
+LOG_FILE=${LOG_DIR}/${PROGNAMESHORT}_${DATETIME}_${CURPID}.log
+mv -f ${TEMP_LOG_FILE} ${LOG_FILE}
+LOGGER I "The LOG_FILE is now being written to ${LOG_FILE}"
+LOGGER I "End - switching temporary LOG to managed structure"
+
+#Reading the Incremental Load Date#
+
+LOGGER I "STARTED READING THE INCREMENTAL LOAD DATE"
+
+#export inc_date=`date`
+if [ ${IS_HIGH_WATER_MARKED} == "Y" ]; then 
+    export inc_date=`date --date='2 minutes ago'`
+else
+    export inc_date="${INCREMENTAL_LOAD_END_TS}"
+fi
+LOGGER I "inc_date: ${inc_date}"
+#inc_load_dt=`date -d "${INCREMENTAL_LOAD_START_TS}" +%Y-%m-%d_%H.%M.%S`
+inc_load_start_dt=`date -d "${INCREMENTAL_LOAD_START_TS}" +%Y-%m-%d_%H.%M.%S`
+inc_load_end_dt=`date -d "${inc_date}" +%Y-%m-%d_%H.%M.%S`
+
+#inc_load_end_dt=`date +'%Y-%m-%d_%H.%M.%S'`
+
+export inc_load_dt="${inc_load_start_dt}_${inc_load_end_dt}"
+#inc_load_dt=${inc_load_start_dt}_${inc_load_end_dt}
+Earliest_Date=`date -d "${INCREMENTAL_LOAD_START_TS}" +%m/%d/%Y:%H:%M:%S`
+Latest_Date=`date -d "${inc_date}" +%m/%d/%Y:%H:%M:%S`
+
+LOGGER I "inc_load_start_dt: ${inc_load_start_dt}"
+LOGGER I "inc_load_end_dt: ${inc_load_end_dt}"
+LOGGER I "inc_load_dt: ${inc_load_dt}"
+LOGGER I "Earliest_Date: ${Earliest_Date}"
+LOGGER I "Latest_Date: ${Latest_Date}"
+
+search_query="$(cat ${SPLUNK_INI_FILE} | grep "${STG_TABLE_NAME}_search_query" | cut -d "=" --complement -f1)"
+LOGGER I "search_query: ${search_query}"
+#search_query=$(echo "${search_query}" |sed -e 's/\${Earliest_Date}/${Earliest_Date}/g')
+#search_query=$(echo "${search_query}" |sed -e 's/\${Latest_Date}/${Latest_Date}/g')
+LOGGER I "mod search_query: ${search_query}"
+
+if [[ $inc_load_dt -eq "" ]]; then
+    LOGGER E "*******ERROR******"
+    LOGGER E "There is no value for inc_load_dt variable"
+    FAILURE 126
+else
+	LOGGER I "ENDED READING THE INCREMENTAL LOAD DATE"
+fi
+
+LOGGER I "Begin-Creating Landing Directory for Splunk  logs"
+
+mkdir -p ${splunk_logs_landing_dir}
+
+if [[ $status -ne 0 ]]; then
+
+    LOGGER E "*******ERROR******"
+    LOGGER E "Landing Directory creation Failed"
+    FAILURE 126
+fi
+
+rm ${splunk_logs_landing_dir}/*.*
+
+LOGGER I "End-Creating Landing Directory for Splunk  logs"
+
+LOGGER I "PULLING THE DATA FROM SPLUNK"
+
+LOGGER I "PULLING INCREMENTAL DATA FROM SPLUNK"
+
+search_string='search earliest='$Earliest_Date' latest='$Latest_Date' '$search_query''
+
+LOGGER I "search_string: ${search_string}"
+
+LOGGER I "splunk_logs_landing_dir: ${splunk_logs_landing_dir}"
+LOGGER I "raw_src_file_nm: ${raw_src_file_nm}"
+
+curl_cmd="$CURL -k -u $SPLUNK_USER:$SPLUNK_PASSWORD $SPLUNKHTTP --data-urlencode search='"$search_string"' -d output_mode=csv -o ${splunk_logs_landing_dir}/${raw_src_file_nm}${inc_load_dt}.${file_extn}"
+
+LOGGER I "curl_cmd: ${curl_cmd}"
+
+echo $curl_cmd > ${BASEDIR}/tmp/${src_file_nm}curl_cmd.sh
+
+sh ${BASEDIR}/tmp/${src_file_nm}curl_cmd.sh 1>> ${SQOOP_TEMP_LOG} 2>&1
+
+status=${PIPESTATUS[0]}
+
+if [[ $status -ne 0 ]]; then
+
+    LOGGER E "*******ERROR******"
+    LOGGER E "JOB FAILED WITH EXIT CODE: ${status}"
+    LOGGER E "JOB FAILED WHILE PULLING THE DATA FROM SPLUNK"
+    cat  ${SQOOP_TEMP_LOG} >> ${LOG_FILE}
+    FAILURE 126
+else
+    LOGGER I "DATA PULLED SUCCESSFULLY FROM SPLUNK"
+fi
+
+LOGGER I "BEGIN - Verify the downloaded file content for any exceptions in file ${src_file_nm}${inc_load_dt}.${file_extn}"
+    cat ${splunk_logs_landing_dir}/${raw_src_file_nm}${inc_load_dt}.${file_extn} | sed -n '1p;$p' | egrep "<response>|</response>"
+    if [ ${?} -eq 0 ]
+    then
+        LOGGER E "********** ERROR **********"
+        LOGGER E "JOB FAILED WITH EXIT CODE: ${?}"
+        LOGGER E "There was an issue while authenticating Aplunk and downloading the file. Please refer the content of file ${raw_src_file_nm}${inc_load_dt}.${file_extn}"
+        cat  ${SQOOP_TEMP_LOG} >> ${LOG_FILE}
+        FAILURE 135
+    else
+        LOGGER I "Splunk files downloaded successfully with out any exceptions"
+    fi
+LOGGER I "END - Verify the downloaded file content for any exceptions in file ${src_file_nm}${inc_load_dt}.${file_extn}"
+
+LOGGER I "BEGIN - Removing the HEADER row from the file and creating the source file ${src_file_nm}${inc_load_dt}.${file_extn}"
+    cat ${splunk_logs_landing_dir}/${raw_src_file_nm}${inc_load_dt}.${file_extn} | tail -n +2 > ${splunk_logs_landing_dir}/${src_file_nm}${inc_load_dt}.${file_extn}
+    if [ ${?} -ne 0 ]
+    then
+        LOGGER E "********** ERROR **********"
+        LOGGER E "JOB FAILED WITH EXIT CODE: ${?}"
+        LOGGER E "There was an issue removing the HEADER row of the file from the folder ${raw_src_file_nm}${inc_load_dt}.${file_extn}"
+        cat  ${SQOOP_TEMP_LOG} >> ${LOG_FILE}
+        FAILURE 135
+    else
+        LOGGER I "Splunk files were cleansed successfully"
+    fi
+LOGGER I "END - Removing the HEADER row from the file and creating the source file ${src_file_nm}${inc_load_dt}.${file_extn}"
+
+if [[ -f ${splunk_logs_landing_dir}/${src_file_nm}${inc_load_dt}.${file_extn} ]]; then
+        LOGGER I "Data present in Splunk, file created successfully"
+	wc -l ${splunk_logs_landing_dir}/${src_file_nm}${inc_load_dt}.${file_extn} | awk -F' ' '{print $1}'> ${BASEDIR}/tmp/${src_file_nm}count.txt
+else
+        LOGGER E "Creating an empty file manually"
+        touch ${splunk_logs_landing_dir}/${src_file_nm}${inc_load_dt}.${file_extn}
+        wc -l ${splunk_logs_landing_dir}/${src_file_nm}${inc_load_dt}.${file_extn} | awk -F' ' '{print $1}'> ${BASEDIR}/tmp/${src_file_nm}count.txt
+fi
+
+LOGGER I "Moving the files to working dir under prep"
+      #mkdir -p ${hdfs_dir}/${SUB_APPLICATION_NAME}/${STG_TABLE_NAME}/working_dir
+      #cp -f ${splunk_logs_landing_dir}/${src_file_nm}${inc_load_dt}.${file_extn} ${hdfs_dir}/${SUB_APPLICATION_NAME}/${STG_TABLE_NAME}/working_dir
+      hadoop fs -mkdir -p ${hdfs_dir}/${SUB_APPLICATION_NAME}/${STG_TABLE_NAME}/working_dir
+      hadoop fs -copyFromLocal ${splunk_logs_landing_dir}/${src_file_nm}${inc_load_dt}.${file_extn} ${hdfs_dir}/${SUB_APPLICATION_NAME}/${STG_TABLE_NAME}/working_dir
+
+status=${PIPESTATUS[0]}
+
+if [[ $status -ne 0 ]]; then
+
+    LOGGER E "*******ERROR******"
+    LOGGER E "JOB FAILED WITH EXIT CODE: ${status}"
+    cat  ${SQOOP_TEMP_LOG} >> ${LOG_FILE}
+    FAILURE 126
+else
+    LOGGER I "Moving the splunk log files to prep working dir DONE SUCCESSFULLY !!!!!"
+fi
+
+LOGGER I "******** BEGIN --Moving Data from prep working directory to prep table******"
+
+hive -e "LOAD DATA INPATH '${LANDING_DIRECTORY}' OVERWRITE INTO TABLE prep.${STAGE_TABLE}" > ${SQOOP_TEMP_LOG}  2>&1
+
+HIVE_RET_CODE=${?}
+
+echo "~~~~~~~HIVE RET CODE IS : " $HIVE_RET_CODE
+if [ ${HIVE_RET_CODE} -ne 0 ]
+then
+    LOGGER E "********** ERROR **********"
+    LOGGER E "JOB FAILED WITH EXIT CODE: ${?}"
+    LOGGER E "There was an issue while loading the data into prep table"
+   cat  ${SQOOP_TEMP_LOG} >> ${LOG_FILE}
+   FAILURE 126
+fi
+
+LOGGER I "******** END --Moving Data from prep working directory to prep table******"
+
+
+LOGGER I "Archiving the source file"
+#mv -f ${splunk_logs_landing_dir}/${src_file_nm}${inc_load_dt}.${file_extn} ${archive_dir}/${src_file_nm}${inc_load_dt}.${file_extn}
+#gzip -f ${archive_dir}/${src_file_nm}${inc_load_dt}.${file_extn}
+
+#hadoop fs -moveFromLocal ${splunk_logs_landing_dir}/${src_file_nm}${inc_load_dt}.${file_extn} ${archive_dir}/${src_file_nm}${inc_load_dt}.${file_extn}
+#hadoop fs -cat ${archive_dir}/${src_file_nm}${inc_load_dt}.${file_extn} | gzip | hadoop fs -put - ${archive_dir}/${src_file_nm}${inc_load_dt}.${file_extn}.gz
+#hadoop fs -rm ${archive_dir}/${src_file_nm}${inc_load_dt}.${file_extn}
+
+gzip -f ${splunk_logs_landing_dir}/${src_file_nm}${inc_load_dt}.${file_extn}
+hadoop fs -moveFromLocal ${splunk_logs_landing_dir}/${src_file_nm}${inc_load_dt}.${file_extn}.gz ${archive_dir}/${src_file_nm}${inc_load_dt}.${file_extn}.gz
+
+status=${PIPESTATUS[0]}
+
+if [[ $status -ne 0 ]]; then
+
+    LOGGER E "*******ERROR******"
+    LOGGER E "JOB FAILED WITH EXIT CODE: ${status}"
+    cat  ${SQOOP_TEMP_LOG} >> ${LOG_FILE}
+    FAILURE 126
+else
+    LOGGER I "splunk log files ARCHIVED SUCCESSFULLY !!!!!"
+fi
+
+LOGGER I "Removing the raw file ${splunk_logs_landing_dir}/${raw_src_file_nm}${inc_load_dt}.${file_extn}"
+rm ${splunk_logs_landing_dir}/${raw_src_file_nm}${inc_load_dt}.${file_extn}
+LOGGER I "Removed the raw file ${splunk_logs_landing_dir}/${raw_src_file_nm}${inc_load_dt}.${file_extn}"
+
+#LOGGER I "Archiving the raw file"
+#mv ${splunk_logs_landing_dir}/${raw_src_file_nm}${inc_load_dt}.${file_extn} ${archive_dir}/${raw_src_file_nm}${inc_load_dt}.${file_extn}
+#gzip ${archive_dir}/${raw_src_file_nm}${inc_load_dt}.${file_extn}
+
+#if [[ $status -ne 0 ]]; then
+
+#    LOGGER E "*******ERROR******"
+#    LOGGER E "JOB FAILED WITH EXIT CODE: ${status}"
+#    cat  ${SQOOP_TEMP_LOG} >> ${LOG_FILE}
+#    FAILURE 126
+#else
+#    LOGGER I "splunk log raw files ARCHIVED SUCCESSFULLY !!!!!"
+#fi
+
+# clean up old log files from the log archive directory
+LOGGER I "BEGIN - REMOVING ${JOB_NAME} LOG FILES FROM ${LOG_DIR}/archive OLDER THAN ${LOG_RETAIN_DAYS} DAYS"
+for X in `find "${LOG_DIR}/archive" "${PROGNAMESHORT}_${JOB_NAME}*" -mtime +${LOG_RETAIN_DAYS}`; do
+    LOGGER I "REMOVING FILE: ${X}"
+    rm -f ${X}
+    if [ ${?} -ne 0 ]
+    then
+        LOGGER E "********** ERROR **********"
+        LOGGER E "ERROR REMOVING FILE ${X}"
+        FAILURE 105
+    fi
+done
+LOGGER I "END - REMOVING ${JOB_NAME} LOG FILES FROM ${LOG_DIR}/archive OLDER THAN ${LOG_RETAIN_DAYS} DAYS"
+
+LOGGER I "CLOSE LOG FILE AND MOVE INTO TAR: ${LOG_DIR}/archive/${PROGNAMESHORT}_${JOB_NAME}_`date +%Y%m%d`.tar"
+LOGGER I "********** END PROCESS **********"
+
+# Upon successful completion of this script, we'll move the log file to the archive directory
+# Becuase we're finalizing the logging, the last cleanup step will be done without logging
+# Because multiple threads of this process may multiple times per day,
+# the logs in the archive directory will be maintained in a tar ball by date
+cd ${LOG_DIR}
+gzip `basename ${LOG_FILE}`
+tar -rf ${LOG_DIR}/archive/${PROGNAMESHORT}_${JOB_NAME}_`date +%Y%m%d`.tar `basename ${LOG_FILE}`.gz
+if [ ${?} -eq 0 ]
+then
+   # Remove the untarred log file once it's been successfully added to the archive tar
+   # if for some reason the tar command fails, the untarred log file will remain in LOG_DIR
+   rm -f ${LOG_FILE}.gz
+fi
+exit 0
+--------------prep_to_jrnl_ingestion.sh------------------------
+# Return Codes:
+#    0   - sucessful execution
+#    101 - a required command line input is either missing or invalid
+#    102 - an unrecognized input switch was provided
+#    103 - could not create temporary log file
+#    104 - a required variable was not defined in the INI_FILE
+#    105 - could not remove an old log file
+#    106 - the Lock file (LOCK_FILE) is not writable
+#    107 - the Lock file (LOCK_FILE) already exists.  A previous scheduled
+#          processes is either still running or has failed mid-stream
+#    110 - the High Water Mark file (HWM_FILE) does not exist
+#    111 - the High Water Mark file (HWM_FILE) is not writable
+#    112 - the Log Directory (LOG_DIR) does not exist
+#    113 - the archive subdirectory of the Log Directory (LOG_DIR/archive) does not exist
+#    114 - the Log Directory (LOG_DIR) is not writable
+#    115 - the archive subdirectory of the Log Directory (LOG_DIR/archive) is not writable"
+#    116 - could not remove LOCK_FILE after completion
+#    117 - could not ceate LOCK_FILE after initializations
+#    118 - could not read current High Water Mark
+#    127 - an INI configured data directory is missing
+#    128 - could not clear existing partition
+#    129 - could not copy file
+#    130 - could not remove directory
+#    131 - could not remove files from directory
+#    132 - could not move file
+#    133 - Hive exited with non-zero return code
+#    134 - could not create directory
+
+export HADOOP_OPTS=-Djava.security.egd=file:/dev/../dev/urandom;
+export BASE_HDFS_INI_LOCATION="/tmp/difa"
+export BASE_HDFS_HSQL_LOCATION="/db/aps/conf/difa"
+export EDGENODE_INI_LOCATION="/etc/se/difa"
+
+# Let's pull in the common functions library
+cd /opt/se/difa/config/
+FUNCTIONS_SRC="functions.inc"
+source ../config/${FUNCTIONS_SRC}
+if [ ${?} -ne 0 ]
+then
+   echo "********** ERROR **********"
+   echo "UNABLE TO SOURCE THE COMMON FUNCTIONS FILE LOCATED AT: ${FUNCTIONS_SRC}"
+   exit 150
+fi
+
+# Done defining the functions
+
+inifile=$(hadoop fs -ls ${BASE_HDFS_INI_LOCATION} | grep "/$2_" | awk -F" " '{print $NF}')
+echo $inifile
+
+if [ $(echo $inifile|wc -c) -ne $(echo $inifile|sed 's/ //g'|wc -c) ]; then
+   echo "********** ERROR **********"
+   echo "THERE EXISTS MULTIPLE INI FILES IN HDFS,FOR THE SAME TABLE_ID=$2 !!"
+   echo "DIFA ERROR CODE:294"
+   exit 294
+fi
+
+edgenode_inifile=`find ${EDGENODE_INI_LOCATION} -name "$2_*.ini"`
+if [ $(echo $edgenode_inifile|wc -c) -ne $(echo $edgenode_inifile|sed 's/ //g'|wc -c) ]; then
+   echo "********** ERROR **********"
+   echo "THERE EXISTS MULTIPLE INI FILES FOR THE SAME TABLE_ID=$2 in EDGENODE!!"
+   echo "DIFA ERROR CODE:119"
+   exit 119
+fi
+
+edgenode_inifile_len=$(echo ${edgenode_inifile}|sed 's/ //g'|wc -c)
+
+rm -f $edgenode_inifile
+hadoop fs -copyToLocal ${inifile} ${EDGENODE_INI_LOCATION}
+if [ ${?} -ne 0 ]
+then
+   echo "********** ERROR **********"
+   echo "hadoop fs -copyToLocal ${inifile} ${EDGENODE_INI_LOCATION} EXECUTION FAILED!!"
+   echo "UNABLE TO COPY THE HDFS INI FILE TO EDGENODE FOR THE CURRENT RUN!!"
+   echo "DIFA ERROR CODE:295"
+   exit 295
+fi
+
+if [ ${edgenode_inifile_len} -le 1 ]; then 
+	edgenode_inifile=`find ${EDGENODE_INI_LOCATION} -name "$2_*.ini"`
+	if [ $(echo $edgenode_inifile|wc -c) -ne $(echo $edgenode_inifile|sed 's/ //g'|wc -c) ]; then
+	   echo "********** ERROR **********"
+	   echo "THERE EXISTS MULTIPLE INI FILES FOR THE SAME TABLE_ID=$2 in EDGENODE!!"
+	   echo "DIFA ERROR CODE:119"
+	   exit 119
+	fi
+fi
+
+INI_FILE=$edgenode_inifile
+chmod 777 $INI_FILE
+echo $INI_FILE
+
+
+# Done defining the functions
+
+
+#################################################################################
+# Start the logical processing
+
+# Set some internal variables
+PROGNAMELONG=`basename $0`                                      # name of the program, minus all of the path info
+PROGNAMESHORT=`echo ${PROGNAMELONG} | sed 's/\.[^.]*$//'`       # name of the program, minus the extension
+DATETIME=`date +%Y%m%d%H%M%S`                                   # datetime stamp yyyymmddhhmiss
+CURPID=$$                              # PID of the current running process (knowing this helps with concurrency)
+USER_ID=`whoami`                                                #generate USERID
+
+# Before we can initialize the dynamic log management, we have to parse the
+# command line and INI to set all of the varibale options.  However, we do want
+# to generate a log right immediately so that we can log the process of parsing
+# the command line and INI (to be able to troubleshoot if those steps fail).
+# We'll start by creating a temporary log in the current working directory.
+# 
+# Dynamic log management will be initialized only after a successful read of the 
+# command line and INI options.  Once that is ready, we'll move the log out of
+# current working directory and into the directory structrue defined in the INI.
+
+
+# OK, now we can start actually logging
+LOGGER I "********** BEGIN PROCESS **********"
+LOGGER I "FULL COMMAND LINE: ${0} ${*}"
+LOGGER I "THE CURRENT UNIX PID IS ${CURPID}"
+
+
+
+# check to ensure that the required -i switch for INI_FILE was provided
+CHECK_NULL_VAR INI_FILE "${INI_FILE}" 101
+
+# check to ensure that the required -s switch for INI_SECTION was provided
+#CHECK_NULL_VAR INI_SECTION "${INI_SECTION}" 101
+
+
+# Source global parameters from the INI file
+LOGGER I "BEGIN - READ GLOBAL VARIBALES FROM INI_FILE"
+PARSE_INI ${INI_FILE} GLOBAL
+LOGGER I "END - READ GLOBAL VARIBALES FROM INI_FILE"
+
+
+# source process-specific parameters from the INI file
+#LOGGER I "Begin - read process-specifc variables from INI_FILE for INI_SECTION"
+#PARSE_INI ${INI_FILE} ${INI_SECTION}
+#LOGGER I "End - read process-specific variables from INI_FILE for INI_SECTION"
+
+
+# source process-specific parameters from the INI file
+TEMP_LOG_DIR=${TMP_DIR}                                              # just the current working directory
+TEMP_LOG_FILE=${TEMP_LOG_DIR}/${PROGNAMESHORT}_${DATETIME}_${CURPID}.log  # temporary log
+LOG_FILE=${TEMP_LOG_FILE}
+
+
+touch ${LOG_FILE} > /dev/null 2>&1
+if ! [ -w ${LOG_FILE} ]; then
+    "********** ERROR **********"
+   echo "THE TEMPORARY LOG FILE ${LOG_FILE} IS NOT WRITABLE"
+   echo "CHECK THE LOCATION AND PERMISSIONS AND TRY AGAIN"
+   FAILURE 103
+fi
+
+LOGGER I "BEGIN - SWITCHING TEMPORARY LOG FILE ${TEMP_LOG_FILE} TO MANAGED STRUCTURE"
+LOG_FILE=${LOG_DIR}/${PROGNAMESHORT}_${JOB_NAME}_${DATETIME}_${CURPID}.log
+mv -f ${TEMP_LOG_FILE} ${LOG_FILE}
+LOGGER I "THE LOG_FILE IS NOW BEING WRITTEN TO ${LOG_FILE}"
+LOGGER I "END - SWITCHING TEMPORARY LOG TO MANAGED STRUCTURE"
+
+
+
+# OK, now we need to validate that other expected variables have been set by the INI
+# process, and that access to additional files or directories are as expected
+
+#CHECK_NULL_VAR EMAIL "${EMAIL}" 104
+#CHECK_NULL_VAR LOG_RETAIN_DAYS "${LOG_RETAIN_DAYS}" 104
+
+#CHECK_NULL_VAR LOG_DIR "${LOG_DIR}" 104
+# Check to ensure the log directory exists
+# note - we could also decide to attempt to create it within the script
+# but my fear is that if the directory disappears, that there might be a
+# larger issue occurring
+#CHECK_DIR_EXISTS LOG_DIR "${LOG_DIR}" 112
+
+# check to confirm that the log directory is writable
+#CHECK_FILE_WRITABLE LOG_DIR_WRITABLE_CHECK ${LOG_DIR}/temp_${CURPID}.log 114
+
+# Check to ensure the archive subdirectory of the log directory exists
+#CHECK_DIR_EXISTS LOG_DIR_ARCHIVE "${LOG_DIR}/archive" 113
+
+# check to ensure that the archive subdirectory of the log directory is writable
+#CHECK_FILE_WRITABLE LOG_DIR_ARCHIVE_WRITABLE_CHECK ${LOG_DIR}/archive/temp_${CURPID}.log 115
+
+#CHECK_NULL_VAR TABLE_ID "${TABLE_ID}" 104
+#CHECK_NULL_VAR SOURCE_DB_TYPE "${SOURCE_DB_TYPE}" 104
+#CHECK_NULL_VAR SOURCE_DB_HOST_NM "${SOURCE_DB_HOST_NM}" 104
+#CHECK_NULL_VAR SOURCE_DB_USER "${SOURCE_DB_USER}" 104
+#CHECK_NULL_VAR SOURCE_DB_NM "${SOURCE_DB_NM}" 104
+
+#DB_PASSWORD=`cat ${BASEDIR}/pass/${DB_TYPE}_${DB_HOST}_${DB_USER}.pwd`
+#if [ "X"${DB_PASSWORD} == "X" ]
+#then
+ #  LOGGER E "********** ERROR **********"
+  # LOGGER E "The Password file does not exist or could not read password from the file"
+  # FAILURE 104
+#fi
+
+#CHECK_NULL_VAR SOURCE_TABLE_NAME "${SOURCE_TABLE_NAME}" 104
+#CHECK_NULL_VAR PARTITION_COLUMN "${SQOOP_SPLIT_BY}" 104
+#CHECK_NULL_VAR NO_OF_PARTITIONS "${NO_OF_PARTITIONS}" 104
+#CHECK_NULL_VAR SQL_OVERRIDE_FLAG "${SQL_OVERRIDE_FLAG}" 104
+#CHECK_NULL_VAR ETL_TYPE "${ETL_TYPE}" 104
+#CHECK_NULL_VAR STAGE_SCHEMA "${STAGE_SCHEMA}" 104
+#CHECK_NULL_VAR STAGE_TABLE "${STAGE_TABLE}" 104
+#CHECK_NULL_VAR SQOOP_STG_DIR "${LANDING_DIRECTORY}" 104
+
+#CHECK_NULL_VAR SRC_DIR "${SRC_DIR}" 104
+#CHECK_HDFS_DIR_EXISTS_OR_CREATE SRC_DIR "${SRC_DIR}" 134
+
+#CHECK_NULL_VAR LOCK_FILE "${LOCK_FILE}" 104
+# Intentionally not using the CHECK_FILE_EXIST function here
+# In this case, I want the process to fail if the file does
+# exist instead of failing when it does not
+
+#LOGGER I "Begin - switching temporary log file ${TEMP_LOG_FILE} to managed structure"
+#LOG_FILE=${BASE_DIR}/logs/${PROGNAMESHORT}_${JOB_NAME}_${DATETIME}_${CURPID}.log
+#mv -f ${TEMP_LOG_FILE} ${LOG_FILE}
+#echo $LOG_FILE
+#LOGGER I "The LOG_FILE is now being written to ${LOG_FILE}"
+#LOGGER I "End - switching temporary LOG to managed structure"
+
+
+
+LOGGER I " BEGIN --DELTA EXTRACTION "
+#setting the hive tables
+ prev_day=`date --date="$(date -d "${DAY_ID}")-1 day" +'%Y-%m-%d'`
+
+  #Datamovement from Working directories to Journal
+LOGGER I "BEGIN -MOVING DATA FROM PREP TO JOURNAL"
+INCREMENTAL_LOAD_START_T="${INCREMENTAL_LOAD_START_TS}"
+
+echo $INCREMENTAL_LOAD_START_T
+export SPLUNK_HSQL_LOCATION="/home/${USER_ID}/jobs/data_ingestion/splunk/hive"
+
+if [ $(hadoop fs -cat ${BASE_HDFS_HSQL_LOCATION}/${TABLE_ID}_jrnl_population_restartibility.dat 2>/dev/null | grep ^JRNL_HIVE_POPULATION_${JOB_ID}|wc -l) -eq 0 ]; then
+
+export BASE_HDFS_HSQL_LOCATION="/db/aps/conf/difa"
+
+DYNAMIC_PARTITION_DML=${JRNL_LOAD_TYPE}
+
+LOGGER I "DYNAMIC_PARTITION_DML=${SPLUNK_HSQL_LOCATION}/${DYNAMIC_PARTITION_DML}"
+
+ 
+LOGGER I "hive  -i ${HIVE_INIT_FILE} -hiveconf mapred.job.queue.name=${test_QUEUE} -hiveconf tez.queue.name=${test_QUEUE}  -hiveconf JRNL_TABLE=${JRNL_TABLE} -hiveconf STAGE_TABLE=${STAGE_TABLE} -hiveconf prev_day=${prev_day} -hiveconf day_id=${DAY_ID} -hiveconf SOURCE_TABLE_NAME=${SOURCE_TABLE_NAME} -hiveconf PARTITON_NAME=${HIVE_PARTITION_NAME} -hiveconf HIVE_PARTITION_FUNCTION=${HIVE_PARTITION_FUNCTION} -hiveconf INCREMENTAL_LOAD_START_TS=\"${INCREMENTAL_LOAD_START_T}\" -hiveconf COLUMNS=${COLUMNS} -hiveconf JRNL_DB_NM=${JRNL_DB_NM} -hiveconf JOB_ID=${JOB_ID} -f ${SPLUNK_HSQL_LOCATION}/${DYNAMIC_PARTITION_DML}" 
+
+   hive  -i ${HIVE_INIT_FILE} -hiveconf mapred.job.queue.name=${test_QUEUE} -hiveconf tez.queue.name=${test_QUEUE}  -hiveconf JRNL_TABLE=${JRNL_TABLE} -hiveconf STAGE_TABLE=${STAGE_TABLE} -hiveconf prev_day=${prev_day} -hiveconf day_id=${DAY_ID} -hiveconf SOURCE_TABLE_NAME=${SOURCE_TABLE_NAME} -hiveconf PARTITON_NAME=${HIVE_PARTITION_NAME} -hiveconf HIVE_PARTITION_FUNCTION=${HIVE_PARTITION_FUNCTION} -hiveconf INCREMENTAL_LOAD_START_TS="${INCREMENTAL_LOAD_START_T}" -hiveconf COLUMNS=${COLUMNS} -hiveconf JRNL_DB_NM=${JRNL_DB_NM} -hiveconf JOB_ID=${JOB_ID} -f ${SPLUNK_HSQL_LOCATION}/${DYNAMIC_PARTITION_DML} 1> ${SQOOP_TEMP_LOG}  2>&1
+       HIVE_RET_CODE3=${?}
+       if [ ${HIVE_RET_CODE3} -ne 0 ]
+       then
+           LOGGER E "********** ERROR **********"
+           LOGGER E "HIVE EXITED WITH A NON-ZERO EXIT CODE: ${HIVE_RET_CODE2}"
+           LOGGER E "THERE IS AN ERROR EXECUTING THE DML SCRIPTS TO LOAD DATA TO THE JOURNAL MAIN TABLE ,FROM PREP TABLES."
+           LOGGER E "BE COGNIZANT OF ANY DATA WHICH MAY HAVE ALREADY PROCESSED PRIOR"
+           LOGGER E "TO THE ERROR (BE CAREFUL NOT TO RERUN INCORRECTLY"
+           LOGGER E "AND POTENTIALLY DUPLICATING DATA)"
+	       cat  ${SQOOP_TEMP_LOG} >> ${LOG_FILE}
+           cat  ${SQOOP_TEMP_LOG} >> ${PROCESS_GENERIC_LOG}
+           FAILURE 224
+       fi
+cat  ${SQOOP_TEMP_LOG} >> ${LOG_FILE}
+
+       echo "JRNL_HIVE_POPULATION_${JOB_ID}">${BASE_DIR}/hive/${TABLE_ID}_jrnl_population_restartibility.dat
+	    if [ $(hadoop fs -ls ${BASE_HDFS_HSQL_LOCATION}/${TABLE_ID}_jrnl_population_restartibility.dat 2>/dev/null | wc -l) -ne 0 ]; then 
+		   hadoop fs -rm -skipTrash ${BASE_HDFS_HSQL_LOCATION}/${TABLE_ID}_jrnl_population_restartibility.dat 
+		   	if [ $? -ne 0 ]; then 
+			 LOGGER E "********** ERROR **********"
+			 LOGGER E "hadoop fs -rm -skipTrash ${BASE_HDFS_HSQL_LOCATION}/${TABLE_ID}_jrnl_population_restartibility.dat EXECUTION FAILED!!"
+			 LOGGER E "COULD NOT BE ABLE TO REMOVE THE PREVIOUS DAY JRNL-POPULATION-RESTARTIBILITY FILE FROM HDFS"
+			 FAILURE 314
+			fi
+		fi	
+		   hadoop fs -copyFromLocal ${BASE_DIR}/hive/${TABLE_ID}_jrnl_population_restartibility.dat ${BASE_HDFS_HSQL_LOCATION}/
+			if [ $? -ne 0 ]; then 
+			 LOGGER E "********** ERROR **********"
+			 LOGGER E "hadoop fs -copyFromLocal ${BASE_DIR}/hive/${TABLE_ID}_jrnl_population_restartibility.dat ${BASE_HDFS_HSQL_LOCATION}/ EXECUTION FAILED!!"
+			 LOGGER E "COULD NOT BE ABLE TO COPY THE CURRENT JRNL-POPULATION-RESTARTIBILITY FILE FROM THE CURRENT EDGENODE TO HDFS" 
+			 FAILURE 315;
+			fi
+LOGGER I "END -DATA MOVEMENT FROM PREP TO JOURNAL" 
+
+else
+  LOGGER I "PREP TO JOURNAL ALREADY DONE!! ENTERED EXCEPTION BLOCK FOR RESTARTIBILITY"
+fi
+
+if  grep -q "IS_HIGH_WATER_MARKED" $INI_FILE
+then
+    LOGGER I "HIGH WATER MARKED WAS FOUND IN $file_name"
+    if  [[ "${IS_HIGH_WATER_MARKED,,}" == 'y' ]]
+    then
+	LOGGER I "HIGH WATER MARK IS ENABLED"
+	count_records=`hive -e "set hive.execution.engine=tez;set tez.queue.name=${test_QUEUE}; use ${JRNL_DB_NM}; select count(*) from ${JRNL_TABLE}";`
+	 if [ ${count_records} -gt 0 ];
+	 then
+	    max_hwm_value=`hive -e "set hive.execution.engine=tez;set tez.queue.name=${test_QUEUE}; use ${JRNL_DB_NM}; select from_unixtime(unix_timestamp(max(${HIGH_WATER_MARK_COLUMN}))+1,'yyyy-MM-ddHH:mm:ss') from ${JRNL_TABLE}";`
+	    LOGGER I "THE HIGH WATER COLUMN VALUE IS:${max_hwm_value}"
+		#"TO_DATE('20160913161941','YYYYMMDDHH24MISS')"
+		 if [ $(echo "${max_hwm_value}"|grep "-"| wc -l) -eq 1  -a  $(echo "${max_hwm_value}"|grep ":"| wc -l) -eq 1 ]; then 
+		  LOGGER I "THE HIGH WATER COLUMN SEEMS TO BE A DATE/TIMESTAMP FIELD"
+		  max_hwm_value="'$(echo ${max_hwm_value}|sed 's/ //g')'"
+		  LOGGER I "THE MODIFIED HIGH WATER COLUMN VALUE IS:${max_hwm_value}"
+		 fi 
+		 
+		LOGGER I "${BASE_DIR}/python/data_profile/Reference_column_updation.py ${TABLE_ID} ${max_hwm_value} ${SQOOP_TEMP_LOG}"
+		
+	    ${BASE_DIR}/python/data_profile/Reference_column_updation.py  ${TABLE_ID} ${max_hwm_value} ${SQOOP_TEMP_LOG} 1>>${SQOOP_TEMP_LOG}
+	    PYTHON_RET_CODE=${?}
+	    if [ ${PYTHON_RET_CODE} -ne 0 ]
+	    then
+			LOGGER E "****** ERROR **********"
+			LOGGER E "THERE IS A PROBLEM WITH UPDATION OF HIGH WATER MARK VALUE"
+			LOGGER E "PLEASE CHECK THE LOG FILE PYTHON SCRIPT ERRORS"
+			cat  ${SQOOP_TEMP_LOG} >> ${LOG_FILE}
+			cat  ${SQOOP_TEMP_LOG} >> ${PROCESS_GENERIC_LOG}
+			FAILURE 176
+	    fi
+		cat  ${SQOOP_TEMP_LOG} >> ${LOG_FILE}
+		LOGGER I "HIGH WATER MARK VALUE UPDATION COMPLETED."
+	 else
+	    LOGGER I "NO RECORDS PRESENT IN JRNL TABLE! SO NOT UPDATING HWM VALUE."
+	 fi
+
+    else
+	  LOGGER I "NO HIGH WATER VALUE PRESENT FOR THIS FILE."
+    fi    
+else
+    LOGGER I "NO HIGH WATER MARK PRESENT FOR THIS FILE."
+fi
+
+    LOGGER I "DATA MOVEMENT FROM PREP TO SRC" 
+    LOGGER I "hive  -i ${HIVE_INIT_FILE} -hiveconf mapred.job.queue.name=${test_QUEUE} -hiveconf tez.queue.name=${test_QUEUE} -hiveconf INCREMENTAL_LOAD_START_TS=${INCREMENTAL_LOAD_START_T} -hiveconf JOB_ID=${JOB_ID} -hiveconf COLUMNS=${COLUMNS} -hiveconf STAGE_TABLE=${STAGE_TABLE} -f ${SPLUNK_HSQL_LOCATION}/test_splunk_preptosrc_datamovement.hql"
+	
+    hive  -i ${HIVE_INIT_FILE} -hiveconf mapred.job.queue.name=${test_QUEUE} -hiveconf tez.queue.name=${test_QUEUE} -hiveconf INCREMENTAL_LOAD_START_TS="${INCREMENTAL_LOAD_START_T}" -hiveconf JOB_ID=${JOB_ID} -hiveconf COLUMNS=${COLUMNS} -hiveconf STAGE_TABLE=${STAGE_TABLE} -f ${SPLUNK_HSQL_LOCATION}/test_splunk_preptosrc_datamovement.hql  1> ${SQOOP_TEMP_LOG}  2>&1
+     HIVE_RET_CODE265=${?}
+     if [ ${HIVE_RET_CODE265} -ne 0 ]
+     then
+        LOGGER E "********** ERROR **********"
+        LOGGER E "HIVE EXITED WITH A NON-ZERO EXIT CODE: ${HIVE_RET_CODE22}"
+        LOGGER E "THERE IS AN ERROR EXECUTING THE DML SCRIPT FOR INSERTING DATA FROM PREP TO SOURCE TABLE FOR ARCHIVAL."
+        LOGGER E "BE COGNIZANT OF ANY DATA WHICH MAY HAVE ALREADY PROCESSED PRIOR"
+        LOGGER E "TO THE ERROR (BE CAREFUL NOT TO RERUN INCORRECTLY"
+        LOGGER E "AND POTENTIALLY DUPLICATING DATA)"
+	    cat  ${SQOOP_TEMP_LOG} >> ${LOG_FILE}
+        cat  ${SQOOP_TEMP_LOG} >> ${PROCESS_GENERIC_LOG}
+        FAILURE 183
+     fi
+    cat  ${SQOOP_TEMP_LOG} >> ${LOG_FILE}
+    LOGGER I "DATA MOVED FROM PREP TO SRC"
+
+
+# clean up old log files from the log archive directory
+LOGGER I "BEGIN - REMOVING ${JOB_NAME} LOG FILES FROM ${LOG_DIR}/archive OLDER THAN ${LOG_RETAIN_DAYS} DAYS"
+for X in `find "${LOG_DIR}/archive" "${PROGNAMESHORT}_${JOB_NAME}*" -mtime +${LOG_RETAIN_DAYS}`; do
+    LOGGER I "REMOVING FILE: ${X}"
+    rm -f ${X}
+    if [ ${?} -ne 0 ]
+    then
+        LOGGER E "********** ERROR **********"
+        LOGGER E "ERROR REMOVING FILE ${X}"
+        FAILURE 105
+    fi
+done
+LOGGER I "END - REMOVING ${JOB_NAME} LOG FILES FROM ${LOG_DIR}/archive OLDER THAN ${LOG_RETAIN_DAYS} DAYS"
+
+LOGGER I "CLOSE LOG FILE AND MOVE INTO TAR: ${LOG_DIR}/archive/${PROGNAMESHORT}_${JOB_NAME}_`date +%Y%m%d`.tar"
+LOGGER I "********** END PROCESS **********"
+
+# Upon successful completion of this script, we'll move the log file to the archive directory
+# Becuase we're finalizing the logging, the last cleanup step will be done without logging
+# Because multiple threads of this process may multiple times per day,
+# the logs in the archive directory will be maintained in a tar ball by date
+cd ${LOG_DIR}
+`cat ${LOG_FILE} >> ${PROCESS_GENERIC_LOG}`
+gzip `basename ${LOG_FILE}`
+tar -rf ${LOG_DIR}/archive/${PROGNAMESHORT}_${JOB_NAME}_`date +%Y%m%d`.tar `basename ${LOG_FILE}`.gz
+if [ ${?} -eq 0 ]
+then
+   # Remove the untarred log file once it's been successfully added to the archive tar
+   # if for some reason the tar command fails, the untarred log file will remain in LOG_DIR
+   rm -f ${LOG_FILE}.gz
+fi
+exit 0
+-------------functions.inc---------
+#################################################################################
+# Reusable Functions
+#################################################################################
+
+function PARSE_INI(){
+#   # function inputs:
+   # ${1} = fully qualified path to INI file
+   # ${2} = name of the section
+
+   eval `sed -e 's/[[:space:]]*\=[[:space:]]*/=/g' \
+       -e 's/;.*$//' \
+       -e 's/[[:space:]]*$//' \
+       -e 's/^[[:space:]]*//' \
+       -e "s/^\(.*\)=\([^\"']*\)$/\1=\"\2\"/" \
+      < ${1} \
+       | sed -n -e "/^\[${2}\]/,/^\s*\[/{/^[^;].*\=.*/p;}"`
+}
+
+function LOGGER(){
+   # function inputs:
+   # ${1} = message type (I, W, E)
+   # ${2} = message to be logged
+   #
+   # The fields in the log message are dash (-) delimited, and are formatted as::
+   #   field 1, srting(29) - timestamp in format:  YYYY-MM-DD HH:MI:SS.NNNNNNNNN 
+   #   field 2, string(7), right padded with spaces - message type (INFO, WARNING, ERROR), 
+   #   field 3, string(n) - descriptive message
+
+   # default message type is Info
+   MESSAGE_TYPE="INFO   "  
+
+   if [ "${1}" = "W" ]
+   then 
+      MESSAGE_TYPE="WARNING"
+   elif [ "${1}" = "E" ]
+   then
+     MESSAGE_TYPE="ERROR  "
+   fi 
+
+   echo `date "+%Y-%m-%d %H:%M:%S.%N"`-"${MESSAGE_TYPE}"-"${2}" | tee -a ${LOG_FILE}
+}
+
+function FAILURE(){
+   # funtion inputs:
+   # ${1} = the return code to exit with
+
+   LOGGER E "EXITING WITH DIFA CUSTOM RETURN CODE:${1}"
+
+mailx -s "${JOB_NAME} Failure" ${EMAIL} << EOF
+THE ${JOB_NAME} JOB HAS FAILED.  PLEASE REVIEW THE LOG FILE LOCATED AT ${HOSTNAME}:${LOG_FILE} FOR MORE INFO.
+HERE IS THE LOG GENERATED DURING THIS RUN.
+
+`cat ${LOG_FILE}`
+EOF
+   
+   exit ${1}
+}
+
+function CHECK_NULL_VAR(){
+   # function inputs:
+   # ${1} = variable name
+   # ${2} = variable value
+   # ${3} = exit code to use when check fails
+   #        if exit code is null, then do not fail
+
+   LOGGER I "BEGIN - CONFIRM ${1} HAS BEEN SET AND HAS A VALUE"
+   if [ "X${2}" = "X" ]
+   then
+      if [ "X${3}" = "X" ]
+      then
+         LOGGER I "VALUE FOR ${1} IS NULL (NOT AN ERROR CONDITION)"
+      else
+         LOGGER E "********** ERROR **********"
+         LOGGER E "A VALID VALUE FOR ${1} HAS NOT BEEN SET"
+         FAILURE ${3};
+      fi
+   fi
+   LOGGER I "${1} HAS BEEN SET TO: ${2}"
+   LOGGER I "END - CONFIRM ${1} HAS BEEN SET AND HAS A VALUE"
+}
+
+function CHECK_FILE_WRITABLE(){
+   # function inputs
+   # ${1} = variable name
+   # ${2} = variable value - fully qualified file name
+   # ${3} = exit code to use when check fails
+   #        if exit code is null, then do not fail
+
+   # need a variable so we know if we need to RM our test file or not
+   TEMP_TOUCH_FLAG=0
+
+   LOGGER I "BEGIN - CHECK IF ${1} FILE ${2} IS WRITABLE"
+   # first we have to check if the exists or not
+   if ! [ -f ${2} ]
+   then
+      LOGGER I "TOUCHING A TEMP FILE FOR WRITABLE VALIDATION"
+      TEMP_TOUCH_FLAG=1
+      touch ${2} > /dev/null 2>&1
+   fi
+
+   if ! [ -w ${2} ]
+   then
+      if [ "X${3}" = "X" ]
+      then
+         LOGGER W "${1} FILE ${2} IS NOT WRITABLE (NOT AN ERROR CONDITION)"
+      else
+         LOGGER E "********* ERROR **********"
+         LOGGER E "${1} FILE ${2} IS NOT WRITABLE"
+         LOGGER E "CHECK THE LOCATION AND PERMISSIONS"
+         FAILURE ${3}
+      fi
+   fi
+
+   if [ ${TEMP_TOUCH_FLAG} -ne 0 ]
+   then
+      LOGGER I "REMOVING THE TEMP FILE USED FOR WRITABLE VALIDATION"
+      rm -f ${2} > /dev/null 2>&1
+   fi
+
+   LOGGER I "END - CHECK IF ${1} FILE ${2} IS WRITABLE"
+}
+
+function CHECK_FILE_EXISTS(){
+   # function inputs
+   # ${1} = variable name
+   # ${2} = varibale value - fully qualified file name
+   # ${3} = exit code to use when check fails
+   #        if exit code is null, then do not fail
+
+   LOGGER I "BEGIN - CHECK IF ${1} FILE ${2} EXISTS"
+   if ! [ -f ${2} ]
+   then
+      if [ "X${3}" = "X" ]
+      then
+         LOGGER W "${1} FILE ${2} DOES NOT EXIST (NOT AN ERROR CONDITION)"
+      else
+         LOGGER E "********* ERROR **********"
+         LOGGER E "${1} FILE ${2} DOES NOT EXIST"
+         LOGGER E "RESEARCH CAUSE OF MISSING FILE, CREATE OR RESTORE FILE IF NEEDED"
+         FAILURE ${3}
+      fi
+   else
+      LOGGER I "${1} FILE ${2} EXISTS"
+   fi
+   LOGGER I "END - CHECK IF ${1} FILE ${2} EXISTS"
+}
+
+function CHECK_DIR_EXISTS() {
+   # function inputs
+   # ${1} = variable name
+   # ${2} = varibale value - fully qualified file name
+   # ${3} = exit code to use when check fails
+   #        if exit code is null, then do not fail
+
+   LOGGER I "BEGIN - CHECK IF ${1} DIRECTORY ${2} EXISTS"
+   if ! [ -d "${2}" ]
+   then
+      if [ "X${3}" = "X" ]
+      then
+         LOGGER W "${1} DIRECTORY ${2} DOES NOT EXIST (NOT AN ERROR CONDITION)"
+      else
+         LOGGER E "********* ERROR **********"
+         LOGGER E "${1} DIRECTORY ${2} DOES NOT EXIST"
+         LOGGER E "RESEARCH CAUSE OF MISSING DIRECTORY"
+         LOGGER E "CORRECT INI SETTING, CREATE OR RESTORE DIRECTORY IF NEEDED"
+         FAILURE ${3}
+      fi
+   else
+      LOGGER I "${1} DIRECTORY ${2} EXISTS"
+   fi
+   LOGGER I "END - CHECK IF ${1} DIRECTORY ${2} EXISTS"
+}
+
+function REMOVE_OLD_LOGS() {
+   # function inputs
+   # ${1} = Log Directory Name
+   # ${2} = Program Name
+   # ${3} = Retention Days
+for X in `find "${1}" "${2}*" -mtime +${3} 2> /dev/null`; 
+do
+   LOGGER I "REMOVING FILE: ${X}"
+   rm -f ${X}
+   if [ ${?} -ne 0 ]
+   then
+      LOGGER E "********** ERROR **********"
+      LOGGER E "ERROR REMOVING FILE ${X}"
+
+
+function CHECK_HDFS_DIR_EXISTS() {
+   # function inputs
+   # ${1} = variable name
+   # ${2} = varibale value - fully qualified file name
+   # ${3} = exit code to use when check fails
+   #        if exit code is null, then do not fail
+
+   LOGGER I "BEGIN - CHECK IF ${1} DIRECTORY ${2} EXISTS"
+   hadoop fs -test -d  ${2}
+
+   if  [ $? -ne 0 ]
+   then
+      if [ "X${3}" = "X" ]
+      then
+         LOGGER W "${1} DIRECTORY ${2} DOES NOT EXIST (NOT AN ERROR CONDITION)"
+      else
+         LOGGER E "********* ERROR **********"
+         LOGGER E "${1} DIRECTORY ${2} DOES NOT EXIST"
+         LOGGER E "RESEARCH CAUSE OF MISSING DIRECTORY"
+         LOGGER E "CORRECT INI SETTING, CREATE OR RESTORE DIRECTORY IF NEEDED"
+         FAILURE ${3}
+      fi
+   else
+      LOGGER I "${1} DIRECTORY ${2} EXISTS"
+   fi
+   LOGGER I "END - CHECK IF ${1} DIRECTORY ${2} EXISTS"
+}
+
+function CHECK_HDFS_DIR_EXISTS_OR_CREATE() {
+   # function inputs
+   # ${1} = variable name
+   # ${2} = varibale value - fully qualified file name
+   # ${3} = exit code to use when check fails
+   #        if exit code is null, then do not fail
+
+   LOGGER I "BEGIN - CHECK IF ${1} DIRECTORY ${2} EXISTS"
+   hadoop fs -test -d  ${2}
+
+   if  [ $? -ne 0 ]
+   then
+      LOGGER I "${1} DIRECTORY ${2} DOES NOT EXISTS"
+      LOGGER I "CREATING DIRECTORY..."
+      hadoop fs -mkdir -p ${2}
+      if  [ $? -ne 0 ]
+      then
+          LOGGER E "********* ERROR **********"
+          LOGGER E "UNABLE TO CREATE ${1} DIRECTORY ${2}"
+          FAILURE ${3}
+      fi
+   else
+      LOGGER I "${1} DIRECTORY ${2} EXISTS"
+   fi
+   LOGGER I "END - CHECK IF ${1} DIRECTORY ${2} EXISTS"
+}
+      FAILURE 105
+   fi
+done
+}
+----------------------
