@@ -13,3 +13,17 @@ LOGGER I "#####################################"
 		  fi;
 		done
 		LOGGER I "End to Identify the PID for $job_name process"
+-----------------------------------------
+# clean up old log files from the log archive directory
+LOGGER I "Begin - Removing ${TBL_NME} log files from ${TEMP_LOG_DIR}/archive older than ${LOG_RETAIN_DAYS} days"
+for X in `find "${TEMP_LOG_DIR}/archive" "${PROGNAMESHORT}_*" -mtime +${LOG_RETAIN_DAYS}`; do
+   LOGGER I "removing file: ${X}"
+   rm -f ${X}
+   if [ ${?} -ne 0 ]
+   then
+      LOGGER E "********** ERROR **********"
+      LOGGER E "Error removing file ${X}"
+   fi
+done
+LOGGER I "End - Removing ${TBL_NME} log files from ${TEMP_LOG_DIR}/archive older than ${LOG_RETAIN_DAYS} days" 
+------------------------------------------
