@@ -1,0 +1,15 @@
+LOGGER I "#####################################"
+		LOGGER I "Start to Identify the PID for $job_name process"
+		PIDS=$(ps -eaf | grep `whoami` | grep -i -w $job_name | grep -v sudo | grep -v grep | awk '{print $2}')
+		if [[ "" == "${PIDS}" ]];then
+		  	LOGGER I "No running process for $job_name"
+	    fi;
+		for PID in ${PIDS}; do
+		  if [[ "" != "${PID}" ]];then
+		  	LOGGER I "killing $job_name process PID : ${PID}"
+		  	kill -9 ${PID}
+		  else
+		  	LOGGER I "No running process for $job_name process"
+		  fi;
+		done
+		LOGGER I "End to Identify the PID for $job_name process"
